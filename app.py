@@ -13,6 +13,9 @@ from eth2spec.config.config_util import prepare_config
 
 from importlib import reload
 
+import csv
+
+from remerkleable.tree import Node
 import fast_spec
 
 # Apply lighthouse config to spec
@@ -122,7 +125,7 @@ async def lit_morty():
         # Play nice, don't hit them with another request right away, wait half a minute. (Age?!)
         # await asyncio.sleep(31)
 
-        async def sync_step(epochs_ctx: fast_spec.EpochsContext, state: fast_spec.BeaconState) -> spec.BeaconState:
+        async def sync_step(stats_csv: csv.DictWriter, epochs_ctx: fast_spec.EpochsContext, state: fast_spec.BeaconState) -> spec.BeaconState:
             range_req = BlocksByRange(start_slot=state.slot + 1, count=10, step=1).encode_bytes().hex()
             print("range req:", range_req)
             blocks = []
@@ -151,10 +154,46 @@ async def lit_morty():
                     import sys
                     sys.exit(1)
 
-                state = transition_input_state
                 end_time = time.time()
                 elapsed_time = end_time - start_time
                 print(f"slot: {state.slot} state root: {state.hash_tree_root().hex()}  processing speed: {1.0 / elapsed_time} blocks / second  ({elapsed_time * 1000.0} ms/block)")
+
+                def subtree_size(n: Node) -> int:
+                    if n.is_leaf():
+                        return 1
+                    return subtree_size(n.get_left()) + subtree_size(n.get_right())
+
+                def analyze_diff(a: Node, b: Node) -> (int, int):
+                    """Iterate over the changes of b, not common with a. Left-to-right order.
+                     Returns (a,b) tuples that can't be diffed deeper."""
+                    if a.root != b.root:
+                        a_leaf = a.is_leaf()
+                        b_leaf = b.is_leaf()
+                        if a_leaf or b_leaf:
+                            return subtree_size(a), subtree_size(b)
+                        else:
+                            a_l, b_l = analyze_diff(a.get_left(), b.get_left())
+                            a_r, b_r = analyze_diff(a.get_right(), b.get_right())
+                            return a_l + a_r + 1, b_l + b_r + 1
+                    return 0, 0
+
+                stats = {
+                    'slot': b.message.slot,
+                    'proposer': epochs_ctx.get_beacon_proposer(b.message.slot),
+                    'process_time': elapsed_time,
+                }
+                for i, key in enumerate(spec.BeaconState.fields().keys()):
+                    a = state.get(i).get_backing()
+                    b = transition_input_state.get(i).get_backing()
+
+                    removed_nodes, added_nodes = analyze_diff(a, b)
+                    stats[f"added_nodes_{key}"] = added_nodes
+                    stats[f"removed_nodes_{key}"] = removed_nodes
+
+                stats_csv.writerow(stats)
+
+                print(f"stats: {stats}")
+                state = transition_input_state
 
             global morty_status
             morty_status = Status(
@@ -167,19 +206,29 @@ async def lit_morty():
 
             return state
 
-        epochs_ctx = fast_spec.EpochsContext()
-        epochs_ctx.load_state(state)
+        async def sync_work(stats_csv: csv.DictWriter, state: spec.BeaconState):
+            epochs_ctx = fast_spec.EpochsContext()
+            epochs_ctx.load_state(state)
 
-        snapshot_step = 200
-        prev_snap_slot = state.slot
-        while True:
-            state = await sync_step(epochs_ctx, state)
-            if state.slot > prev_snap_slot + snapshot_step:
-                with io.open('state_snapshot.ssz', 'bw') as f:
-                    state.serialize(f)
-                prev_snap_slot = state.slot
-            if state.slot > 1000:
-                break  # synced enough (TODO: use bootnode status instead)
+            snapshot_step = 200
+            prev_snap_slot = state.slot
+            while True:
+                state = await sync_step(stats_csv, epochs_ctx, state)
+                if state.slot > prev_snap_slot + snapshot_step:
+                    with io.open('state_snapshot.ssz', 'bw') as f:
+                        state.serialize(f)
+                    prev_snap_slot = state.slot
+                if state.slot > 4000:
+                    break  # synced enough (TODO: use bootnode status instead)
+
+        with open(r'sync_stats.csv', 'a', newline='') as csvfile:
+            fieldnames = ['slot', 'proposer', 'process_time']
+            for key in spec.BeaconState.fields().keys():
+                fieldnames.append(f"added_nodes_{key}")
+                fieldnames.append(f"removed_nodes_{key}")
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            await sync_work(writer, state)
 
         print("Saying goobye")
         ok_bye_bye = Goodbye(1)  # A.k.a "Client shut down"

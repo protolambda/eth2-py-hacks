@@ -75,3 +75,8 @@ venv.bak/
 
 # Sphinx docs output
 docs/_build
+
+
+# debug data
+*.ssz
+*.csv

@@ -1,3 +1,5 @@
 -e ../remerkleable
 -e ../pyrum
 ../eth2.0-specs
+matplotlib
+pandas
