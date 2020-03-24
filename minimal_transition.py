@@ -1,4 +1,4 @@
-from eth2spec.phase0 import spec
+# from eth2spec.phase0 import spec
 from eth2spec.config.config_util import prepare_config
 
 from importlib import reload
@@ -7,10 +7,10 @@ import io
 import os
 
 import fast_spec
+spec = fast_spec
 
 # Apply lighthouse config to spec
-prepare_config("./", "config")
-reload(spec)
+prepare_config("./lighthouse", "config")
 reload(fast_spec)
 
 # Turn off sig verification

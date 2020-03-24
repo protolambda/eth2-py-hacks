@@ -2,6 +2,7 @@ import asyncio
 import io
 import os
 import time
+import traceback
 
 from pyrum import Rumor
 
@@ -146,6 +147,7 @@ async def lit_morty():
                     fast_spec.state_transition(epochs_ctx, transition_input_state, b)
                 except Exception as e:
                     print("failed transition: ", e)
+                    traceback.print_tb(e.__traceback__)
                     print("failing block: ", b)
                     with io.open('state_fail.ssz', 'bw') as f:
                         state.serialize(f)

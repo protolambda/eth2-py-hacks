@@ -871,7 +871,7 @@ def prepare_epoch_process_state(epochs_ctx: EpochsContext, state: BeaconState) -
             exit_queue_end = v.exit_epoch
 
         if v.activation_eligibility_epoch == FAR_FUTURE_EPOCH and v.effective_balance == MAX_EFFECTIVE_BALANCE:
-            v.activation_eligibility_epoch += 1
+            v.activation_eligibility_epoch = current_epoch + 1
 
         if v.activation_eligibility_epoch != FAR_FUTURE_EPOCH and v.activation_epoch >= activation_epoch:
             out.indices_to_activate.append(ValidatorIndex(i))
@@ -1006,22 +1006,22 @@ def process_justification_and_finalization(epochs_ctx: EpochsContext, process: E
 
     # Process justifications
     state.previous_justified_checkpoint = state.current_justified_checkpoint
-    justification_bits = state.justification_bits
+    bits = state.justification_bits
     # shift bits, zero out new bit space
-    justification_bits[1:] = justification_bits[:-1]
-    justification_bits[0] = 0b0
+    bits[1:] = bits[:-1]
+    bits[0] = 0b0
     if process.prev_epoch_stake.target_stake * 3 >= process.total_active_stake * 2:
         state.current_justified_checkpoint = Checkpoint(epoch=previous_epoch,
                                                         root=get_block_root(state, previous_epoch))
-        justification_bits[1] = 0b1
+        bits[1] = 0b1
     if process.curr_epoch_stake.target_stake * 3 >= process.total_active_stake * 2:
         state.current_justified_checkpoint = Checkpoint(epoch=current_epoch,
                                                         root=get_block_root(state, current_epoch))
-        justification_bits[0] = 0b1
-    state.justification_bits = justification_bits
+        bits[0] = 0b1
+    state.justification_bits = bits
+    assert len(bits) == 4
 
     # Process finalizations
-    bits = state.justification_bits
     # The 2nd/3rd/4th most recent epochs are justified, the 2nd using the 4th as source
     if all(bits[1:4]) and old_previous_justified_checkpoint.epoch + 3 == current_epoch:
         state.finalized_checkpoint = old_previous_justified_checkpoint
