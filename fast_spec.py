@@ -756,7 +756,11 @@ class EpochProcess(object):
     curr_epoch_stake: EpochStakeSummary
     active_validators: int  # Thanks to exit delay, this does not change within the epoch processing.
     indices_to_slash: PyList[ValidatorIndex]
-    indices_to_activate: PyList[ValidatorIndex]  # ignores churn. Apply churn-limit manually.
+    indices_to_set_activation_eligibility: PyList[ValidatorIndex]
+    # ignores churn. Apply churn-limit manually.
+    # Maybe, because finality affects it still.
+    indices_to_maybe_activate: PyList[ValidatorIndex]
+
     indices_to_eject: PyList[ValidatorIndex]
     exit_queue_end: Epoch
     exit_queue_end_churn: int
@@ -772,7 +776,8 @@ class EpochProcess(object):
         self.curr_epoch_stake = EpochStakeSummary()
         self.active_validators = 0
         self.indices_to_slash = []
-        self.indices_to_activate = []
+        self.indices_to_set_activation_eligibility = []
+        self.indices_to_maybe_activate = []
         self.indices_to_eject = []
         self.exit_queue_end = Epoch(0)
         self.exit_queue_end_churn = 0
@@ -836,10 +841,6 @@ def prepare_epoch_process_state(epochs_ctx: EpochsContext, state: BeaconState) -
     out.current_epoch = current_epoch
     out.prev_epoch = prev_epoch
 
-    finality = state.finalized_checkpoint
-    
-    activation_epoch = compute_activation_exit_epoch(finality.epoch)
-
     withdrawable_epoch = current_epoch + (EPOCHS_PER_SLASHINGS_VECTOR // 2)
     exit_queue_end = compute_activation_exit_epoch(current_epoch)
 
@@ -871,10 +872,10 @@ def prepare_epoch_process_state(epochs_ctx: EpochsContext, state: BeaconState) -
             exit_queue_end = v.exit_epoch
 
         if v.activation_eligibility_epoch == FAR_FUTURE_EPOCH and v.effective_balance == MAX_EFFECTIVE_BALANCE:
-            v.activation_eligibility_epoch = current_epoch + 1
+            out.indices_to_set_activation_eligibility.append(ValidatorIndex(i))
 
-        if v.activation_eligibility_epoch != FAR_FUTURE_EPOCH and v.activation_epoch >= activation_epoch:
-            out.indices_to_activate.append(ValidatorIndex(i))
+        if v.activation_epoch == FAR_FUTURE_EPOCH and v.activation_eligibility_epoch <= current_epoch:
+            out.indices_to_maybe_activate.append(ValidatorIndex(i))
 
         if not status.active and v.effective_balance <= EJECTION_BALANCE and v.exit_epoch == FAR_FUTURE_EPOCH:
             out.indices_to_eject.append(ValidatorIndex(i))
@@ -882,8 +883,8 @@ def prepare_epoch_process_state(epochs_ctx: EpochsContext, state: BeaconState) -
         out.statuses.append(status)
 
     # order by the sequence of activation_eligibility_epoch setting and then index
-    out.indices_to_activate = sorted(out.indices_to_activate,
-                                     key=lambda i: (out.statuses[i].validator.activation_eligibility_epoch, i))
+    out.indices_to_maybe_activate = sorted(out.indices_to_maybe_activate,
+                                           key=lambda i: (out.statuses[i].validator.activation_eligibility_epoch, i))
 
     exit_queue_end_churn = uint64(0)
     for status in out.statuses:
@@ -1143,8 +1144,16 @@ def process_registry_updates(epochs_ctx: EpochsContext, process: EpochProcess, s
             end_churn = 0
             exit_end += 1
 
+    # Set new activation eligibilities
+    for index in process.indices_to_set_activation_eligibility:
+        state.validators[index].activation_eligibility_epoch = epochs_ctx.current_shuffling.epoch + 1
+
+    finality_epoch = state.finalized_checkpoint.epoch
     # Dequeued validators for activation up to churn limit
-    for index in process.indices_to_activate[:process.churn_limit]:
+    for index in process.indices_to_maybe_activate[:process.churn_limit]:
+        # Placement in queue is finalized
+        if process.statuses[index].validator.activation_eligibility_epoch > finality_epoch:
+            break  # remaining validators all have an activation_eligibility_epoch that is higher anyway, break early.
         validator = state.validators[index]
         validator.activation_epoch = compute_activation_exit_epoch(process.current_epoch)
 

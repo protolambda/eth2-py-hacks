@@ -29,8 +29,8 @@ def load_block(filepath: str) -> spec.SignedBeaconBlock:
         return spec.SignedBeaconBlock.deserialize(f, block_size)
 
 print("loading inputs")
-state = load_state('state_fail.ssz')
-block = load_block('block_fail.ssz')
+state = load_state('pre.ssz')
+block = load_block('block.ssz')
 
 print("loading transition context")
 epochs_ctx = fast_spec.EpochsContext()
@@ -40,7 +40,7 @@ print("running transition")
 fast_spec.process_slots(epochs_ctx, state, block.message.slot)
 
 print("saving post state")
-with io.open('state_fail_out.ssz', 'bw') as f:
+with io.open('post.ssz', 'bw') as f:
     state.serialize(f)
 
 print("done")

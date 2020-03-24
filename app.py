@@ -68,7 +68,7 @@ async def lit_morty():
     rumor = Rumor()
     await rumor.start(cmd='cd ../rumor && go run .')
 
-    state = load_state('lighthouse/genesis.ssz')
+    state = load_state('fail_state_pre.ssz')  #'lighthouse/genesis.ssz')
 
     morty = rumor.actor('morty')
     await morty.host.start().ok
@@ -142,16 +142,18 @@ async def lit_morty():
             for b in blocks:
                 print("processing block!")
                 start_time = time.time()
+                transition_input_state = state.copy()
                 try:
-                    transition_input_state = state.copy()
                     fast_spec.state_transition(epochs_ctx, transition_input_state, b)
                 except Exception as e:
                     print("failed transition: ", e)
                     traceback.print_tb(e.__traceback__)
                     print("failing block: ", b)
-                    with io.open('state_fail.ssz', 'bw') as f:
+                    with io.open('fail_state_post.ssz', 'bw') as f:
+                        transition_input_state.serialize(f)
+                    with io.open('fail_state_pre.ssz', 'bw') as f:
                         state.serialize(f)
-                    with io.open('block_fail.ssz', 'bw') as f:
+                    with io.open('fail_block.ssz', 'bw') as f:
                         b.serialize(f)
                     import sys
                     sys.exit(1)
@@ -212,15 +214,9 @@ async def lit_morty():
             epochs_ctx = fast_spec.EpochsContext()
             epochs_ctx.load_state(state)
 
-            snapshot_step = 200
-            prev_snap_slot = state.slot
             while True:
                 state = await sync_step(stats_csv, epochs_ctx, state)
-                if state.slot > prev_snap_slot + snapshot_step:
-                    with io.open('state_snapshot.ssz', 'bw') as f:
-                        state.serialize(f)
-                    prev_snap_slot = state.slot
-                if state.slot > 4000:
+                if state.slot > 10000:
                     break  # synced enough (TODO: use bootnode status instead)
 
         with open(r'sync_stats.csv', 'a', newline='') as csvfile:
