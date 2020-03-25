@@ -33,6 +33,8 @@ print("loading inputs")
 state = load_fast_state('fail_state_pre.ssz')
 block = load_block('fail_block.ssz')
 
+print(f"deposit_count: {state.eth1_data.deposit_count} eth1_deposit_index: {state.eth1_deposit_index}")
+
 print(f"slot: {state.slot}  val count: {len(state.validators)}")
 
 print("loading transition context")
@@ -44,12 +46,14 @@ fast_state = state.copy()
 canon_state = canon_spec.BeaconState.view_from_backing(fast_state.get_backing())
 
 print("fast transition...")
-fast_spec.state_transition(epochs_ctx, fast_state, block, validate_result=False)
+fast_block = fast_spec.SignedBeaconBlock.view_from_backing(block.get_backing())
+fast_spec.state_transition(epochs_ctx, fast_state, fast_block, validate_result=False)
 print(f"fast post state root: {fast_state.hash_tree_root().hex()}")
 
 print("canon transition...")
-canon_spec.state_transition(canon_state, block, validate_result=False)
-print(f"fast post state root: {fast_state.hash_tree_root().hex()}")
+canon_block = canon_spec.SignedBeaconBlock.view_from_backing(block.get_backing())
+canon_spec.state_transition(canon_state, canon_block, validate_result=False)
+print(f"canon post state root: {canon_state.hash_tree_root().hex()}")
 
 print(f"expected block state root: {block.message.state_root.hex()}")
 

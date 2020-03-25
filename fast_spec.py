@@ -855,18 +855,17 @@ def prepare_epoch_process_state(epochs_ctx: EpochsContext, state: BeaconState) -
                 out.indices_to_slash.append(ValidatorIndex(i))
         else:
             status.flags |= FLAG_UNSLASHED
-        
+
+        if is_active_flat_validator(v, prev_epoch) or (v.slashed and (prev_epoch + 1 < v.withdrawable_epoch)):
+            status.flags |= FLAG_ELIGIBLE_ATTESTER
+
         active = is_active_flat_validator(v, current_epoch)
         if active:
-            status.flags |= FLAG_ELIGIBLE_ATTESTER
             status.active = True
             out.total_active_stake += v.effective_balance
             active_count += 1
             if not v.slashed:
                 out.total_active_unslashed_stake += v.effective_balance
-        elif v.slashed:
-            if prev_epoch + 1 < v.withdrawable_epoch:
-                status.flags |= FLAG_ELIGIBLE_ATTESTER
 
         if v.exit_epoch != FAR_FUTURE_EPOCH and v.exit_epoch > exit_queue_end:
             exit_queue_end = v.exit_epoch
@@ -1240,6 +1239,8 @@ def process_eth1_data(epochs_ctx: EpochsContext, state: BeaconState, body: Beaco
 
 
 def process_operations(epochs_ctx: EpochsContext, state: BeaconState, body: BeaconBlockBody) -> None:
+
+    print(f"fast: deposit_count: {state.eth1_data.deposit_count} eth1_deposit_index: {state.eth1_deposit_index}")
     # Verify that outstanding deposits are processed up to the maximum number of deposits
     assert len(body.deposits) == min(MAX_DEPOSITS, state.eth1_data.deposit_count - state.eth1_deposit_index)
 
