@@ -68,7 +68,7 @@ async def lit_morty():
     rumor = Rumor()
     await rumor.start(cmd='cd ../rumor && go run .')
 
-    state = load_state('fail_state_pre.ssz')  #'lighthouse/genesis.ssz')
+    state = load_state('lighthouse/genesis.ssz')
 
     morty = rumor.actor('morty')
     await morty.host.start().ok
