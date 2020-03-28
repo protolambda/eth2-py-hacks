@@ -1,17 +1,11 @@
-# from eth2spec.phase0 import spec
-from eth2spec.config.config_util import prepare_config
-
-from importlib import reload
-
 import io
 import os
 
-import fast_spec
-spec = fast_spec
-
-# Apply lighthouse config to spec
+from eth2spec.config.config_util import prepare_config
+# Apply lighthouse config to spec (instead of reloading spec, we can prepare the config before the spec is loaded)
 prepare_config("./lighthouse", "config")
-reload(fast_spec)
+
+import fast_spec as spec
 
 # Turn off sig verification
 spec.bls.bls_active = False
@@ -33,11 +27,11 @@ state = load_state('pre.ssz')
 block = load_block('block.ssz')
 
 print("loading transition context")
-epochs_ctx = fast_spec.EpochsContext()
+epochs_ctx = spec.EpochsContext()
 epochs_ctx.load_state(state)
 
 print("running transition")
-fast_spec.process_slots(epochs_ctx, state, block.message.slot)
+spec.process_slots(epochs_ctx, state, block.message.slot)
 
 print("saving post state")
 with io.open('post.ssz', 'bw') as f:

@@ -904,27 +904,35 @@ def prepare_epoch_process_state(epochs_ctx: EpochsContext, state: BeaconState) -
                              epoch_stake_sum: EpochStakeSummary,
                              epoch: Epoch, source_flag: int, target_flag: int, head_flag: int):
 
-        target_block_root = get_block_root_at_slot(state, compute_start_slot_at_epoch(epoch))
+        actual_target_block_root = get_block_root_at_slot(state, compute_start_slot_at_epoch(epoch))
 
         # Python quirk; avoid Gwei during summation here, not worth the __add__ overhead.
         source_stake, target_stake, head_stake = 0, 0, 0
 
         for att in attestations:
-            att_block_root = get_block_root_at_slot(state, att.data.slot)
+            # Load all the attestation details from the state tree once, do not reload for each participant.
+            att_data = att.data
+            att_slot = att_data.slot
+            committee_index = att_data.index
+            proposer_index = att.proposer_index
+            inclusion_delay = att.inclusion_delay
+            att_bits = list(att.aggregation_bits)  # TODO: optimize bit-list access more
+            att_voted_target_root = att_data.target.root == actual_target_block_root
+            att_voted_head_root = att_data.beacon_block_root == get_block_root_at_slot(state, att_slot)
 
             # attestation-target is already known to be this epoch, get it from the pre-computed shuffling directly.
-            committee = epochs_ctx.get_beacon_committee(att.data.slot, att.data.index)
+            committee = epochs_ctx.get_beacon_committee(att_slot, committee_index)
+
+            participants = list(index for i, index in enumerate(committee) if att_bits[i])
 
             if epoch == prev_epoch:
-                for p in committee:
+                for p in participants:
                     status = statuses[p]
 
                     # If the attestation is the earliest, i.e. has the smallest delay
-                    if status.proposer_index == -1 or status.inclusion_delay > att.inclusion_delay:
-                        status.proposer_index = att.proposer_index
-                        status.inclusion_delay = att.inclusion_delay
-
-            participants = list(index for i, index in enumerate(committee) if att.aggregation_bits[i])
+                    if status.proposer_index == -1 or status.inclusion_delay > inclusion_delay:
+                        status.proposer_index = proposer_index
+                        status.inclusion_delay = inclusion_delay
 
             for p in participants:
                 status = statuses[p]
@@ -934,14 +942,14 @@ def prepare_epoch_process_state(epochs_ctx: EpochsContext, state: BeaconState) -
                 source_stake += status.validator.effective_balance
 
                 # If the attestation is for the boundary:
-                if att.data.target.root == target_block_root:
+                if att_voted_target_root:
                     status.flags |= target_flag
                     target_stake += status.validator.effective_balance
 
                 # TODO: from v0.10->v0.11, this moves under the above target condition.
                 # head rewards become a subset of target rewards.
                 # If the attestation is for the head (att the time of attestation):
-                if att.data.beacon_block_root == att_block_root:
+                if att_voted_head_root:
                     status.flags |= head_flag
                     head_stake += status.validator.effective_balance
 
@@ -1239,8 +1247,6 @@ def process_eth1_data(epochs_ctx: EpochsContext, state: BeaconState, body: Beaco
 
 
 def process_operations(epochs_ctx: EpochsContext, state: BeaconState, body: BeaconBlockBody) -> None:
-
-    print(f"fast: deposit_count: {state.eth1_data.deposit_count} eth1_deposit_index: {state.eth1_deposit_index}")
     # Verify that outstanding deposits are processed up to the maximum number of deposits
     assert len(body.deposits) == min(MAX_DEPOSITS, state.eth1_data.deposit_count - state.eth1_deposit_index)
 
