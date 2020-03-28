@@ -1,3 +1,4 @@
 remerkleable==0.1.12
-pyrum==0.0.6
-git+https://github.com/ethereum/eth2.0-specs@v0.11.0
+pyrum==0.1.0
+trio==0.13.0
+eth2spec==0.11.1
