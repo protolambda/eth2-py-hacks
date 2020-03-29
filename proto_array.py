@@ -1,5 +1,12 @@
-from typing import NewType, Optional, List, Dict, Iterable, Generic, TypeVar, Protocol, Generator
-from fast_spec import Epoch, Slot, Root, compute_epoch_at_slot
+# Note: The Python implementation of Proto-array is an adaption of the Rust implementation by Sigma Prime (Apache 2.0).
+# The Rust implementation is in turn an adaption of the original Proto-array work of @protolambda (licensed under MIT).
+# However, as part of the Eth2 specification effort, and wider discussions with Eth2 implementers, the general idea of
+# this implementation can be regarded as licensed under CC0 1.0 Universal, like the Eth2 specification.
+#
+from typing import NewType, Optional, List, Dict, Iterable, Generic, TypeVar, Protocol, Generator, Sequence
+from fast_spec import Epoch, Slot, Root, ValidatorIndex, Gwei, Checkpoint, compute_epoch_at_slot
+
+ZERO_ROOT = Root()
 
 ProtoNodeIndex = NewType('ProtoNodeIndex', int)
 
@@ -18,7 +25,7 @@ class BlockNode(Generic[T]):
 
 
 class ProtoNode(Generic[T]):
-    block: BlockNode
+    block: BlockNode[T]
     parent: Optional[ProtoNodeIndex]
     justified_epoch: Epoch
     finalized_epoch: Epoch
@@ -26,7 +33,7 @@ class ProtoNode(Generic[T]):
     best_child: Optional[ProtoNodeIndex]
     best_descendant: Optional[ProtoNodeIndex]
 
-    def __init__(self, block: BlockNode, parent: Optional[ProtoNodeIndex],
+    def __init__(self, block: BlockNode[T], parent: Optional[ProtoNodeIndex],
                  justified_epoch: Epoch, finalized_epoch: Epoch):
         self.block = block
         self.parent = parent
@@ -50,8 +57,8 @@ class ProtoArray(Generic[T]):
     _block_sink: BlockSink
     _index_offset: ProtoNodeIndex
     _finalized_root: Root
-    justified_epoch: Epoch
-    finalized_epoch: Epoch
+    _justified_epoch: Epoch
+    _finalized_epoch: Epoch
     nodes: List[ProtoNode[T]]
     indices: Dict[Root, ProtoNodeIndex]
 
@@ -59,9 +66,9 @@ class ProtoArray(Generic[T]):
                  finalized_block: BlockNode[T], block_sink: BlockSink):
         self._block_sink = block_sink
         self._index_offset = ProtoNodeIndex(0)
-        self.justified_epoch = justified_epoch
+        self._justified_epoch = justified_epoch
         finalized_epoch = compute_epoch_at_slot(finalized_block.slot)
-        self.finalized_epoch = finalized_epoch
+        self._finalized_epoch = finalized_epoch
         finalized_node = ProtoNode[T](
             block=finalized_block,
             parent=None,
@@ -79,7 +86,7 @@ class ProtoArray(Generic[T]):
             raise IndexError(f"Maximum proto-array index is {self._index_offset + len(self.nodes)}")
         return self.nodes[i]
 
-    def canonical_chain(self, anchor_root: Root) -> Generator[BlockNode]:
+    def canonical_chain(self, anchor_root: Root) -> Generator[BlockNode[T]]:
         """From head back to anchor root (including the anchor itself)"""
         index: Optional[ProtoNodeIndex] = self.indices[self.find_head(anchor_root).root]  # KeyError if unknown root
         while index is not None and index >= self._index_offset:
@@ -88,6 +95,15 @@ class ProtoArray(Generic[T]):
             if node.block.root == anchor_root:
                 break
             index = node.parent
+
+    def contains_block(self, block_root: Root) -> bool:
+        return block_root in self.indices
+
+    def get_block(self, block_root: Root) -> Optional[BlockNode[T]]:
+        blk_index = self.indices.get(block_root, default=None)
+        if blk_index is None:
+            return None
+        return self._get_node(blk_index).block
 
     def apply_score_changes(self, deltas: Iterable[int], justified_epoch: Epoch, finalized_epoch: Epoch):
         """
@@ -108,9 +124,9 @@ class ProtoArray(Generic[T]):
         deltas = list(deltas)  # Copy, during back-prop the contents are mutated.
         assert len(deltas) == len(self.nodes) == len(self.indices)
 
-        if justified_epoch != self.justified_epoch or finalized_epoch != self.finalized_epoch:
-            self.justified_epoch = justified_epoch
-            self.finalized_epoch = finalized_epoch
+        if justified_epoch != self._justified_epoch or finalized_epoch != self._finalized_epoch:
+            self._justified_epoch = justified_epoch
+            self._finalized_epoch = finalized_epoch
 
         # Iterate backwards through all indices in `self.nodes`.
         for node_index, node in zip(range(self._index_offset+len(self.nodes)-1, self._index_offset-1, -1), self.nodes):
@@ -150,7 +166,7 @@ class ProtoArray(Generic[T]):
         if node.parent is not None:
             self._maybe_update_best_child_and_descendant(node.parent, node_index)
 
-    def find_head(self, anchor_root: Root) -> BlockNode:
+    def find_head(self, anchor_root: Root) -> BlockNode[T]:
         """
         Finds the head, starting from the anchor_root subtree. (justified_root for regular fork-choice)
 
@@ -286,5 +302,93 @@ class ProtoArray(Generic[T]):
 
         Any node that has a different finalized or justified epoch should not be viable for the head.
         """
-        return (node.justified_epoch == self.justified_epoch or self.justified_epoch == 0) and\
-               (node.finalized_epoch == self.finalized_epoch or self.finalized_epoch == 0)
+        return (node.justified_epoch == self._justified_epoch or self._justified_epoch == 0) and \
+               (node.finalized_epoch == self._finalized_epoch or self._finalized_epoch == 0)
+
+
+class VoteTracker(object):
+    current_root: Root
+    next_root: Root
+    next_epoch: Epoch
+
+    def __init__(self, current_root: Root, next_root: Root, next_epoch: Epoch):
+        self.current_root = current_root
+        self.next_root = next_root
+        self.next_epoch = next_epoch
+
+
+class ForkChoice(Generic[T]):
+    proto_array: ProtoArray[T]
+    votes: List[VoteTracker]
+    balances: Sequence[Gwei]
+
+    justified: Checkpoint
+    finalized: Checkpoint
+
+    def __init__(self, finalized_block: BlockNode[T], finalized: Checkpoint, justified: Checkpoint, block_sink: BlockSink):
+        finalized_epoch = compute_epoch_at_slot(finalized_block.slot)
+        assert finalized_epoch == finalized.epoch
+        self.proto_array = ProtoArray(justified.epoch, finalized_block, block_sink)
+        self.balances = []
+        self.votes = []
+
+    def process_attestation(self, validator_index: ValidatorIndex, block_root: Root, target_epoch: Epoch):
+        if validator_index >= len(self.votes):
+            self.votes.extend([VoteTracker(ZERO_ROOT, ZERO_ROOT, Epoch(0)) for _ in range(len(self.votes) - validator_index)])
+        vote = self.votes[validator_index]
+        if target_epoch > vote.next_epoch:
+            vote.next_root = block_root
+            vote.next_epoch = target_epoch
+    
+    def process_block(self, block: BlockNode[T], parent_root: Root,
+                      justified_epoch: Epoch, finalized_epoch: Epoch):
+        self.proto_array.on_block(block, parent_root, justified_epoch, finalized_epoch)
+
+    def update_justified(self, justified: Checkpoint, finalized: Checkpoint,
+                         justified_state_balances: Sequence[Gwei]):
+        old_balances = self.balances
+        new_balances = justified_state_balances
+
+        deltas = _compute_deltas(self.proto_array.indices, self.votes, old_balances, new_balances)
+
+        self.proto_array.apply_score_changes(deltas, justified.epoch, finalized.epoch)
+
+        self.balances = new_balances
+        self.justified = justified
+        self.finalized = finalized
+
+    def find_head(self) -> BlockNode[T]:
+        return self.proto_array.find_head(self.justified.root)
+
+
+def _compute_deltas(indices: Dict[Root, int], votes: List[VoteTracker],
+                    old_balances: Sequence[Gwei], new_balances: Sequence[Gwei]) -> Sequence[int]:
+    """
+    Returns a list of `deltas`, where there is one delta for each of the ProtoArray nodes.
+
+    The deltas are calculated between `old_balances` and `new_balances`, and/or a change of vote.
+    """
+    deltas = [0] * len(indices)
+
+    for val_index, vote in enumerate(votes):
+        # There is no need to create a score change if the validator has never voted (may not be active)
+        # or both their votes are for the zero hash (alias to the genesis block).
+        if vote.current_root == ZERO_ROOT and vote.next_root == ZERO_ROOT:
+            continue
+
+        # Validator sets may have different sizes (but attesters are not different, activation only under finality)
+        old_balance = old_balances[0] if val_index < len(old_balances) else 0
+        new_balance = new_balances[0] if val_index < len(new_balances) else 0
+
+        if vote.current_root != vote.next_root or old_balance != new_balance:
+            # Ignore the current or next vote if it is not known in `indices`.
+            # We assume that it is outside of our tree (i.e., pre-finalization) and therefore not interesting.
+            if vote.current_root in indices:
+                deltas[indices[vote.current_root]] -= old_balance
+
+            if vote.next_root in indices:
+                deltas[indices[vote.next_root]] += new_balance
+            
+            vote.current_root = vote.next_root
+
+    return deltas
