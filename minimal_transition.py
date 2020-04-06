@@ -31,7 +31,8 @@ epochs_ctx = spec.EpochsContext()
 epochs_ctx.load_state(state)
 
 print("running transition")
-spec.process_slots(epochs_ctx, state, block.message.slot)
+# spec.process_slots(epochs_ctx, state, block.message.slot)
+spec.state_transition(epochs_ctx, state, block)
 
 print("saving post state")
 with io.open('post.ssz', 'bw') as f:

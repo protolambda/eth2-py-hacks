@@ -702,6 +702,10 @@ FLAG_ELIGIBLE_ATTESTER = 1 << 7
 
 
 class FlatValidator(object):
+
+    __slots__ = 'effective_balance', 'slashed', 'activation_eligibility_epoch',\
+                'activation_epoch', 'exit_epoch', 'withdrawable_epoch'
+
     effective_balance: Gwei  # Balance at stake
     slashed: boolean
     # Status epochs
@@ -711,16 +715,14 @@ class FlatValidator(object):
     withdrawable_epoch: Epoch  # When validator can withdraw funds
 
     def __init__(self, v: Validator):
-        # TODO; unpack tree-validator with read-only container iterator.
-        self.effective_balance = v.effective_balance
-        self.slashed = v.slashed
-        self.activation_eligibility_epoch = v.activation_eligibility_epoch
-        self.activation_epoch = v.activation_epoch
-        self.exit_epoch = v.exit_epoch
-        self.withdrawable_epoch = v.withdrawable_epoch
+        _, _, self.effective_balance, self.slashed, self.activation_eligibility_epoch, \
+            self.activation_epoch, self.exit_epoch, self.withdrawable_epoch = v
 
 
 class AttesterStatus(object):
+
+    __slots__ = 'flags', 'proposer_index', 'inclusion_delay', 'validator', 'active'
+
     flags: int
     proposer_index: int  # -1 when not included by any proposer
     inclusion_delay: int
@@ -736,6 +738,9 @@ class AttesterStatus(object):
 
 
 class EpochStakeSummary(object):
+
+    __slots__ = 'source_stake', 'target_stake', 'head_stake'
+
     source_stake: Gwei
     target_stake: Gwei
     head_stake: Gwei
@@ -844,6 +849,10 @@ def prepare_epoch_process_state(epochs_ctx: EpochsContext, state: BeaconState) -
     withdrawable_epoch = current_epoch + (EPOCHS_PER_SLASHINGS_VECTOR // 2)
     exit_queue_end = compute_activation_exit_epoch(current_epoch)
 
+    # Don't check every addition for overflow, only check the final integer (since it doesn't wrap anyway).
+    total_active_stake: int = 0
+    total_active_unslashed_stake: int = 0
+
     active_count = uint64(0)
     # fast read-only iterate over tree-structured validator set.
     for i, tree_v in enumerate(state.validators.readonly_iter()):
@@ -862,10 +871,10 @@ def prepare_epoch_process_state(epochs_ctx: EpochsContext, state: BeaconState) -
         active = is_active_flat_validator(v, current_epoch)
         if active:
             status.active = True
-            out.total_active_stake += v.effective_balance
+            total_active_stake += v.effective_balance
             active_count += 1
             if not v.slashed:
-                out.total_active_unslashed_stake += v.effective_balance
+                total_active_unslashed_stake += v.effective_balance
 
         if v.exit_epoch != FAR_FUTURE_EPOCH and v.exit_epoch > exit_queue_end:
             exit_queue_end = v.exit_epoch
@@ -880,6 +889,12 @@ def prepare_epoch_process_state(epochs_ctx: EpochsContext, state: BeaconState) -
             out.indices_to_eject.append(ValidatorIndex(i))
 
         out.statuses.append(status)
+
+    out.total_active_stake = Gwei(total_active_stake)
+    out.total_active_unslashed_stake = Gwei(total_active_unslashed_stake)
+
+    if out.total_active_stake < EFFECTIVE_BALANCE_INCREMENT:
+        out.total_active_stake = EFFECTIVE_BALANCE_INCREMENT
 
     # order by the sequence of activation_eligibility_epoch setting and then index
     out.indices_to_maybe_activate = sorted(out.indices_to_maybe_activate,
@@ -911,14 +926,13 @@ def prepare_epoch_process_state(epochs_ctx: EpochsContext, state: BeaconState) -
 
         for att in attestations:
             # Load all the attestation details from the state tree once, do not reload for each participant.
-            att_data = att.data
-            att_slot = att_data.slot
-            committee_index = att_data.index
-            proposer_index = att.proposer_index
-            inclusion_delay = att.inclusion_delay
-            att_bits = list(att.aggregation_bits)  # TODO: optimize bit-list access more
-            att_voted_target_root = att_data.target.root == actual_target_block_root
-            att_voted_head_root = att_data.beacon_block_root == get_block_root_at_slot(state, att_slot)
+            aggregation_bits, att_data, inclusion_delay, proposer_index = att
+
+            att_slot, committee_index, att_beacon_block_root, _, att_target = att_data
+
+            att_bits = list(aggregation_bits)
+            att_voted_target_root = att_target.root == actual_target_block_root
+            att_voted_head_root = att_beacon_block_root == get_block_root_at_slot(state, att_slot)
 
             # attestation-target is already known to be this epoch, get it from the pre-computed shuffling directly.
             committee = epochs_ctx.get_beacon_committee(att_slot, committee_index)
@@ -1046,8 +1060,8 @@ def process_justification_and_finalization(epochs_ctx: EpochsContext, process: E
 
 def get_attestation_deltas(epochs_ctx: EpochsContext, process: EpochProcess, state: BeaconState) -> Tuple[Sequence[Gwei], Sequence[Gwei]]:
     validator_count = len(process.statuses)
-    rewards = [Gwei(0) for _ in range(validator_count)]
-    penalties = [Gwei(0) for _ in range(validator_count)]
+    rewards = [0 for _ in range(validator_count)]
+    penalties = [0 for _ in range(validator_count)]
 
     total_balance = process.total_active_unslashed_stake
     if total_balance == 0:
@@ -1085,7 +1099,7 @@ def get_attestation_deltas(epochs_ctx: EpochsContext, process: EpochProcess, sta
                 proposer_reward = base_reward // PROPOSER_REWARD_QUOTIENT
                 rewards[status.proposer_index] += proposer_reward
                 max_attester_reward = base_reward - proposer_reward
-                rewards[i] += max_attester_reward // Gwei(status.inclusion_delay)
+                rewards[i] += max_attester_reward // status.inclusion_delay
             else:
                 # Justification-non-participation R-penalty
                 penalties[i] += base_reward
@@ -1110,9 +1124,9 @@ def get_attestation_deltas(epochs_ctx: EpochsContext, process: EpochProcess, sta
             if finality_delay > MIN_EPOCHS_TO_INACTIVITY_PENALTY:
                 penalties[i] += base_reward * BASE_REWARDS_PER_EPOCH
                 if not has_markers(status.flags, FLAG_PREV_HEAD_ATTESTER | FLAG_UNSLASHED):
-                    penalties[i] += eff_balance * Gwei(finality_delay) // INACTIVITY_PENALTY_QUOTIENT
+                    penalties[i] += eff_balance * finality_delay // INACTIVITY_PENALTY_QUOTIENT
 
-    return rewards, penalties
+    return list(map(Gwei, rewards)), list(map(Gwei, penalties))
 
 
 def process_rewards_and_penalties(epochs_ctx: EpochsContext, process: EpochProcess, state: BeaconState) -> None:
@@ -1167,7 +1181,7 @@ def process_registry_updates(epochs_ctx: EpochsContext, process: EpochProcess, s
 
 def process_slashings(epochs_ctx: EpochsContext, process: EpochProcess, state: BeaconState) -> None:
     total_balance = process.total_active_stake
-    slashings_scale = min(sum(state.slashings) * 3, total_balance)
+    slashings_scale = min(sum(state.slashings.readonly_iter()) * 3, total_balance)
     for index in process.indices_to_slash:
         increment = EFFECTIVE_BALANCE_INCREMENT  # Factored out from penalty numerator to avoid uint64 overflow
         effective_balance = process.statuses[index].validator.effective_balance
@@ -1185,8 +1199,8 @@ def process_final_updates(epochs_ctx: EpochsContext, process: EpochProcess, stat
         state.eth1_data_votes = []
 
     # Update effective balances with hysteresis
-    for index, status in enumerate(process.statuses):
-        balance = state.balances[index]
+    for index, (status, balance) in enumerate(zip(process.statuses, state.balances.readonly_iter())):
+        balance = int(balance)
         HALF_INCREMENT = EFFECTIVE_BALANCE_INCREMENT // 2
         effective_balance = status.validator.effective_balance
         if balance < effective_balance or effective_balance + 3 * HALF_INCREMENT < balance:
@@ -1241,9 +1255,12 @@ def process_randao(epochs_ctx: EpochsContext, state: BeaconState, body: BeaconBl
 
 
 def process_eth1_data(epochs_ctx: EpochsContext, state: BeaconState, body: BeaconBlockBody) -> None:
-    state.eth1_data_votes.append(body.eth1_data)
-    if state.eth1_data_votes.count(body.eth1_data) * 2 > SLOTS_PER_ETH1_VOTING_PERIOD:
-        state.eth1_data = body.eth1_data
+    new_eth1_data = body.eth1_data
+    state.eth1_data_votes.append(new_eth1_data)
+    if state.eth1_data == new_eth1_data:
+        return  # Nothing to do if the state already has this as eth1data (happens a lot after majority vote is in)
+    if list(state.eth1_data_votes.readonly_iter()).count(new_eth1_data) * 2 > SLOTS_PER_ETH1_VOTING_PERIOD:
+        state.eth1_data = new_eth1_data
 
 
 def process_operations(epochs_ctx: EpochsContext, state: BeaconState, body: BeaconBlockBody) -> None:
@@ -1367,7 +1384,7 @@ def is_valid_indexed_attestation(epochs_ctx: EpochsContext, state: BeaconState, 
     """
     Check if ``indexed_attestation`` has valid indices and signature.
     """
-    indices = list(indexed_attestation.attesting_indices)
+    indices = list(indexed_attestation.attesting_indices.readonly_iter())
 
     # Verify max number of indices
     if not len(indices) <= MAX_VALIDATORS_PER_COMMITTEE:
@@ -1409,7 +1426,7 @@ def process_attestation(epochs_ctx: EpochsContext, state: BeaconState, attestati
 
     # Return the indexed attestation corresponding to ``attestation``.
     def get_indexed_attestation(attestation: Attestation) -> IndexedAttestation:
-        bits = attestation.aggregation_bits
+        bits = list(attestation.aggregation_bits)
         committee = epochs_ctx.get_beacon_committee(data.slot, data.index)
         attesting_indices = set(index for i, index in enumerate(committee) if bits[i])
 

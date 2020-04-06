@@ -102,7 +102,7 @@ async def lit_morty(rumor: Rumor):
         # await trio.sleep(31)
 
         async def sync_step(stats_csv: csv.DictWriter, epochs_ctx: fast_spec.EpochsContext, state: fast_spec.BeaconState) -> spec.BeaconState:
-            range_req = BlocksByRange(start_slot=state.slot + 1, count=10, step=1).encode_bytes().hex()
+            range_req = BlocksByRange(start_slot=state.slot + 1, count=20, step=1).encode_bytes().hex()
             print("range req:", range_req)
             blocks = []
             async for chunk in morty.rpc.blocks_by_range.req.raw(peer_id, range_req, max_chunks=10, raw=True).chunk():
@@ -118,7 +118,7 @@ async def lit_morty(rumor: Rumor):
                 print("processing block!")
                 start_time = time.time()
                 if state.slot > 500 and (state.slot + 1) % fast_spec.SLOTS_PER_EPOCH == 0:
-                    with io.open('state.ssz', 'bw') as f:
+                    with io.open('pre.ssz', 'bw') as f:
                         state.serialize(f)
                     with io.open('block.ssz', 'bw') as f:
                         b.serialize(f)

@@ -1,4 +1,4 @@
-remerkleable==0.1.12
+remerkleable==0.1.13
 pyrum==0.1.0
 trio==0.13.0
 eth2spec==0.11.1
