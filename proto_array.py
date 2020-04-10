@@ -213,6 +213,8 @@ class ProtoArray(Generic[T]):
 
         # Drop all the nodes prior to finalization.
         self.nodes = list(self.nodes[anchor_index-self._index_offset:])
+        # update offset
+        self._index_offset = anchor_index
 
     def _maybe_update_best_child_and_descendant(self, parent_index: ProtoNodeIndex, child_index: ProtoNodeIndex):
         """
