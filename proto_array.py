@@ -4,7 +4,7 @@
 # this implementation can be regarded as licensed under CC0 1.0 Universal, like the Eth2 specification.
 #
 from typing import NewType, Optional, List, Dict, Iterable, Generic, TypeVar, Protocol, Generator, Sequence
-from fast_spec import Epoch, Slot, Root, ValidatorIndex, Gwei, Checkpoint, compute_epoch_at_slot
+from eth2fastspec import Epoch, Slot, Root, ValidatorIndex, Gwei, Checkpoint, compute_epoch_at_slot
 
 ZERO_ROOT = Root()
 
@@ -129,7 +129,9 @@ class ProtoArray(Generic[T]):
             self._finalized_epoch = finalized_epoch
 
         # Iterate backwards through all indices in `self.nodes`.
-        for node_index, node in zip(range(self._index_offset+len(self.nodes)-1, self._index_offset-1, -1), self.nodes):
+        min_bound = self._index_offset-1
+        max_index = min_bound+len(self.nodes)
+        for node_index, node in zip(range(max_index, min_bound, -1), reversed(self.nodes)):
 
             node_delta = deltas[node_index]
 
@@ -336,7 +338,8 @@ class ForkChoice(Generic[T]):
 
     def process_attestation(self, validator_index: ValidatorIndex, block_root: Root, target_epoch: Epoch):
         if validator_index >= len(self.votes):
-            self.votes.extend([VoteTracker(ZERO_ROOT, ZERO_ROOT, Epoch(0)) for _ in range(len(self.votes) - validator_index)])
+            self.votes.extend([VoteTracker(ZERO_ROOT, ZERO_ROOT, Epoch(0))
+                               for _ in range(validator_index + 1 - len(self.votes))])
         vote = self.votes[validator_index]
         if target_epoch > vote.next_epoch:
             vote.next_root = block_root
